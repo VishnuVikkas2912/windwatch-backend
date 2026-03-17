@@ -71,7 +71,6 @@ def login():
 
 # ─── CSV ANALYSIS ─────────────────────────────────────────
 def analyze(df, meta):
-    # ── Auto-detect columns
     col_map = {}
     for col in df.columns:
         cl = col.lower().strip()
@@ -117,7 +116,6 @@ def analyze(df, meta):
 
     if len(df)<100: raise ValueError(f"Only {len(df)} valid rows. Need at least 100.")
 
-    # ── Estimate missing sensors using physics (no random noise)
     ws = df['wind_speed']
     pw = df['power_output']
     if 'gearbox_temp'    not in df.columns: df['gearbox_temp']    = (50 + ws*0.8).round(1)
@@ -131,8 +129,6 @@ def analyze(df, meta):
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
     total_rows = len(df)
-
-    # ── Date range
     date_range = f"{total_rows:,} readings"
     if 'timestamp' in df.columns:
         try:
@@ -143,14 +139,12 @@ def analyze(df, meta):
                 df['month'] = df['ts_parsed'].dt.to_period('M')
         except: pass
 
-    # ── Wind speed distribution
     bins   = [0,3,6,9,12,15,18,25]
     labels = ['0-3','3-6','6-9','9-12','12-15','15-18','18+']
     df['ws_bin'] = pd.cut(df['wind_speed'], bins=bins, labels=labels, right=False)
     wind_dist = df['ws_bin'].value_counts().reindex(labels, fill_value=0)
     wind_distribution = [{'range':k,'count':int(v)} for k,v in wind_dist.items()]
 
-    # ── Power curve (actual vs theoretical)
     power_curve = []
     for label, grp in df.groupby('ws_bin', observed=True):
         if len(grp)>5:
@@ -161,7 +155,6 @@ def analyze(df, meta):
                 'count': len(grp)
             })
 
-    # ── Windowed fault detection
     wsize = min(500, total_rows//10)
     step  = max(1, wsize//2)
     labels_list, fault_windows = [], []
@@ -193,7 +186,6 @@ def analyze(df, meta):
     warning_n = labels_list.count(1)
     critical_n= labels_list.count(2)
 
-    # ── Fault categorization
     fault_counts = {}
     for fw in fault_windows:
         if fw['gt_max']>65:    k='Gearbox Overheating'
@@ -209,7 +201,6 @@ def analyze(df, meta):
     total_energy    = round(float(df['power_output'].sum())*10/3600000,2)
     capacity_factor = round(avg_power/2000*100,1)
 
-    # ── Per-turbine sensor summary (from actual data)
     sensor_summary = {
         'avg_gearbox_temp':    round(float(df['gearbox_temp'].mean()),1),
         'max_gearbox_temp':    round(float(df['gearbox_temp'].max()),1),
@@ -223,7 +214,6 @@ def analyze(df, meta):
         'max_wind_speed':      round(float(df['wind_speed'].max()),1),
     }
 
-    # ── Monthly breakdown
     monthly = []
     if 'month' in df.columns:
         try:
@@ -239,7 +229,6 @@ def analyze(df, meta):
                 })
         except: pass
 
-    # ── Time series sample (every Nth row for chart)
     sample_n = min(200, total_rows)
     step_ts  = max(1, total_rows//sample_n)
     sampled  = df.iloc[::step_ts].head(sample_n)
@@ -255,7 +244,6 @@ def analyze(df, meta):
             'rotor_rpm':        round(float(row['rotor_rpm']),1),
         })
 
-    # ── Recommendations
     recs = []
     critical_pct = round(critical_n/total_w*100,1)
     warning_pct  = round(warning_n/total_w*100,1)
@@ -350,13 +338,29 @@ def get_reports():
         out.append(d)
     return jsonify(out)
 
-import os
+# ─── DELETE REPORT ────────────────────────────────────────
+@app.route('/api/company/reports/<int:report_id>', methods=['DELETE'])
+def delete_report(report_id):
+    token   = request.headers.get('Authorization','').replace('Bearer ','')
+    company = verify_token(token)
+    if not company: return jsonify({'error':'Unauthorized'}),401
 
-if __name__ == "__main__":
+    c = get_conn()
+    # Make sure report belongs to this company
+    row = c.execute('SELECT * FROM reports WHERE id=? AND company_id=?',(report_id, company['id'])).fetchone()
+    if not row:
+        c.close()
+        return jsonify({'error':'Report not found.'}),404
+
+    c.execute('DELETE FROM reports WHERE id=?',(report_id,))
+    c.commit(); c.close()
+    return jsonify({'success':True,'deleted_id':report_id})
+
+if __name__ == '__main__':
     init_db()
     print("="*50)
-    print("WindWatch API starting...")
+    print("  WindWatch API — http://localhost:5000")
     print("="*50)
-
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
